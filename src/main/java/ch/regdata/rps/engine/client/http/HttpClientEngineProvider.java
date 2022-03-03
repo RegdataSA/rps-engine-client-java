@@ -6,9 +6,7 @@ import ch.regdata.rps.engine.client.model.api.request.RequestBody;
 import ch.regdata.rps.engine.client.model.api.response.ResponseBody;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.http.Consts;
-import org.apache.http.HttpEntity;
-import org.apache.http.NameValuePair;
+import org.apache.http.*;
 import org.apache.http.client.ClientProtocolException;
 import org.apache.http.client.ResponseHandler;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
@@ -30,6 +28,7 @@ import org.apache.http.util.EntityUtils;
 
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -46,7 +45,7 @@ public class HttpClientEngineProvider implements IRPSEngineProvider {
     private String apiKey;
     private String secretKey;
     private boolean acceptSelSigned = false;
-    private final TokenCache tokenCache = new TokenCache();
+    private String token = "";
 
     public HttpClientEngineProvider() {
 
@@ -111,7 +110,7 @@ public class HttpClientEngineProvider implements IRPSEngineProvider {
     public ResponseBody transformAsync(RequestBody requestBody) {
         try {
             // Get authentication token
-            String bearer = authenticate();
+            String bearer = token;
 
             CloseableHttpClient httpClient = getHttpClient(acceptSelSigned);
             String authorizationString = "Bearer " + bearer;    // Authorization string
@@ -125,21 +124,15 @@ public class HttpClientEngineProvider implements IRPSEngineProvider {
             String jsonRequest = mapper.writeValueAsString(requestBody);
             post.setEntity(new StringEntity(jsonRequest, "UTF-8"));
 
-            // Handle the response as a string
-            ResponseHandler<String> responseHandler = response -> {
-                int status = response.getStatusLine().getStatusCode();
-                if (status == 200) {
-                    HttpEntity responseEntity = response.getEntity();
-                    return responseEntity != null ? EntityUtils.toString(responseEntity) : null;
-                } else {
-                    System.out.println("ERROR: Transformation method returned " + response.getStatusLine().getStatusCode() +
-                            " " + response.getStatusLine().getReasonPhrase());
-                    return null;
-                }
-            };
-
             try {
-                String responseBody = httpClient.execute(post, responseHandler);
+                HttpResponse response = httpClient.execute(post);
+                if (response.getStatusLine().getStatusCode() == HttpStatus.SC_UNAUTHORIZED) {
+                    token=authenticate();
+                    authorizationString = "Bearer " + token;
+                    post.setHeader("Authorization", authorizationString);
+                    response = httpClient.execute(post);
+                }
+                String responseBody=EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
                 // Deserialize JSon response to ResponseBody object
                 ResponseBody body = responseBody != null ? mapper.readValue(responseBody, ResponseBody.class)
                         : new ResponseBody();
@@ -163,11 +156,6 @@ public class HttpClientEngineProvider implements IRPSEngineProvider {
      * @return java.lang.String access token
      */
     public String authenticate() {
-
-        String cachedToken = tokenCache.getToken(ENGINE_TOKEN);
-
-        if (cachedToken != null)
-            return cachedToken;
 
         // Uses a form application/x-www-form-urlencoded
         List<NameValuePair> formparams = new ArrayList<>();
@@ -197,9 +185,6 @@ public class HttpClientEngineProvider implements IRPSEngineProvider {
             ObjectMapper mapper = new ObjectMapper();
             mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
             Token token = mapper.readValue(responseBody, Token.class);
-            // Add the token to the cache
-            tokenCache.addToken(ENGINE_TOKEN, token.getAccess_token(), Long.valueOf(token.getExpires_in()));
-            // Then return the token
             return token.getAccess_token();
         } catch (IOException e) {
             e.printStackTrace();
